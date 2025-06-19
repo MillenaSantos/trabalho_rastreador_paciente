@@ -1,57 +1,26 @@
-import 'package:firebase_core/firebase_core.dart';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:firebase_database/firebase_database.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:paciente/background_service.dart';
 import 'package:paciente/components/customButton.dart';
 import 'package:paciente/components/customTextfield.dart';
-import 'dart:async';
+import 'package:paciente/home_page.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:paciente/home.dart';
+//const fetchLocationTask = "fetchLocation";
+
+class LatLng {
+  final double latitude;
+  final double longitude;
+
+  LatLng(this.latitude, this.longitude);
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
   runApp(const MyApp());
-}
-
-Future<Position> _getCurrentLocation() async {
-  bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-  if (!serviceEnabled) {
-    return Future.error('Serviço de localização está desabilitado.');
-  }
-
-  LocationPermission permission = await Geolocator.checkPermission();
-  if (permission == LocationPermission.denied) {
-    permission = await Geolocator.requestPermission();
-    if (permission == LocationPermission.denied) {
-      return Future.error('Permissão de localização negada');
-    }
-  }
-
-  if (permission == LocationPermission.deniedForever) {
-    return Future.error('Permissão de localização permanentemente negada.');
-  }
-
-  return await Geolocator.getCurrentPosition();
-}
-
-Future<void> _updateLocationInRealtime(String patientCode) async {
-  try {
-    Position position = await _getCurrentLocation();
-
-    final databaseRef = FirebaseDatabase.instance.ref();
-
-    await databaseRef.child('locations/$patientCode').set({
-      'codigoPaciente': patientCode,
-      'latitude': position.latitude,
-      'longitude': position.longitude,
-      'timestamp': DateTime.now().toIso8601String(),
-    });
-
-    print('Localização atualizada no Realtime Database com sucesso!');
-  } catch (e) {
-    print('Erro ao atualizar localização: $e');
-  }
 }
 
 class MyApp extends StatelessWidget {
@@ -60,18 +29,17 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Monitoramento de Área',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const MyHomePage(title: 'Monitoramento de Área'),
     );
   }
 }
 
 class MyHomePage extends StatefulWidget {
   const MyHomePage({super.key, required this.title});
-
   final String title;
 
   @override
@@ -80,19 +48,49 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   final TextEditingController patientCodController = TextEditingController();
-  Timer? _timer;
-
-  void _startLocationUpdating(String patientCode) {
-    const interval = Duration(seconds: 5);
-    _timer = Timer.periodic(interval, (timer) {
-      _updateLocationInRealtime(patientCode);
-    });
-  }
 
   @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
+  void initState() {
+    super.initState();
+    _loadSavedCode(); // Chama a função ao iniciar
+  }
+
+  void _loadSavedCode() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedCode = prefs.getString('patientCode');
+
+    if (savedCode != null && savedCode.isNotEmpty) {
+      await initializeService(savedCode);
+
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) => LocationSendingPage(patientCode: savedCode),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<bool> _requestLocationPermission() async {
+    print("ENTREI");
+    LocationPermission permission = await Geolocator.checkPermission();
+
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      return false;
+    }
+
+    if (permission == LocationPermission.whileInUse ||
+        permission == LocationPermission.always) {
+      return true;
+    }
+
+    return false;
   }
 
   @override
@@ -105,7 +103,7 @@ class _MyHomePageState extends State<MyHomePage> {
             mainAxisAlignment: MainAxisAlignment.start,
             children: <Widget>[
               const SizedBox(height: 150),
-              const Icon(Icons.person, size: 150),
+              const Icon(Icons.person_pin_circle, size: 150),
               const SizedBox(height: 25),
               MyTextField(
                 controller: patientCodController,
@@ -115,16 +113,31 @@ class _MyHomePageState extends State<MyHomePage> {
               ),
               const SizedBox(height: 25),
               MyButton(
-                onTap: () {
-                  if (patientCodController.text.isNotEmpty) {
-                    _startLocationUpdating(patientCodController.text);
+                onTap: () async {
+                  patientCodController.text =
+                      patientCodController.text.toUpperCase();
+                  final code = patientCodController.text.trim();
+                  if (code.isNotEmpty) {
+                    bool temPermissao = await _requestLocationPermission();
+                    if (!temPermissao) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Permissão de localização necessária.'),
+                        ),
+                      );
+                      return;
+                    }
+
+                    await initializeService(code);
+
+                    final prefs = await SharedPreferences.getInstance();
+                    await prefs.setString('patientCode', code);
+
                     Navigator.push(
                       context,
                       MaterialPageRoute(
                         builder:
-                            (context) => LocationSendingPage(
-                              patientCode: patientCodController.text,
-                            ),
+                            (context) => LocationSendingPage(patientCode: code),
                       ),
                     );
                   }
